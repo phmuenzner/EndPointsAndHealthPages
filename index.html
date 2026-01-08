@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Endpoint-Übersicht mit Health-Check</title>
+  <style>
+    :root {
+      --ok: #2e7d32;
+      --warn: #d84315;
+      --bg: #0f172a;
+      --card: #111827;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #3b82f6;
+    }
+    body {
+      margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+      background: linear-gradient(180deg, #0f172a, #020617);
+      color: var(--text);
+    }
+    header, footer { padding: 2rem 1.25rem; max-width: 1100px; margin: 0 auto; }
+    h1 { margin: 0 0 .5rem; font-size: 1.9rem; }
+    .desc { color: var(--muted); margin-top: .25rem; }
+    .controls {
+      display: flex; gap: .75rem; flex-wrap: wrap; margin-top: 1rem;
+    }
+    button, .toggle {
+      background: var(--card); color: var(--text); border: 1px solid #374151;
+      padding: .6rem .9rem; border-radius: .5rem; cursor: pointer;
+    }
+    button:hover, .toggle:hover { border-color: var(--accent); }
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 1.25rem 2rem; }
+    .grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 1rem; margin-top: 1rem;
+    }
+    .card {
+      background: radial-gradient(1200px 600px at 10% 0%, #111827 0%, rgba(59,130,246,.08) 38%, rgba(2,6,23,.8) 60%);
+      border: 1px solid #1f2937; border-radius: .8rem; padding: 1rem;
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    }
+    .title { display: flex; align-items: center; gap: .5rem; font-weight: 600; }
+    .badge {
+      padding: .25rem .5rem; border-radius: .4rem; font-size: .8rem; border: 1px solid #334155;
+      color: var(--muted); background: #0b1724;
+    }
+    .ok { color: var(--ok); }
+    .bad { color: var(--warn); }
+    .meta { font-size: .9rem; color: var(--muted); margin-top: .5rem; display: flex; gap: .75rem; flex-wrap: wrap; }
+    .row { margin-top: .5rem; word-break: break-word; }
+    .link {
+      display: inline-flex; align-items: center; gap: .4rem; color: var(--accent); text-decoration: none;
+      border-bottom: 1px dashed rgba(59,130,246,.5);
+    }
+    .link:hover { color: #60a5fa; }
+    .pre {
+      margin-top: .6rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: .8rem; color: #cbd5e1; background: #0b1220; border: 1px solid #1f2937; border-radius: .5rem;
+      padding: .6rem; white-space: pre-wrap; max-height: 160px; overflow: auto;
+    }
+    .footer { color: var(--muted); font-size: .85rem; margin-top: 1.5rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Endpoints &amp; Health-Checks</h1>
+    <div class="desc">Diese App prüft zuerst die Healthpages der konfigurierten Dienste und listet die Endpunkte mit Status auf.</div>
+    <div class="controls">
+      <button id="runBtn">Health-Checks starten</button>
+      <label class="toggle">
+        <input type="checkbox" id="onlyHealthy" /> Nur gesunde anzeigen
+      </label>
+      <button id="reloadBtn">Neu laden</button>
+	  <button id="exportBtn" title="Letzte Ergebnisse als JSON exportieren">JSON exportieren</button>
+    </div>
+    <div class="footer">dfg</div>
+  </header>
+
+  <div class="container">
+    <div id="summary"></div>
+    <div class="grid" id="cards"></div>
+  </div>
+
+  <footer>
+	<div class="werwars">wurde mit Copilot erstellt, weil ich keine lust hatte das selbst zu machen...</div>
+  </footer>
+
+  <script>
+    // ==== Konfiguration =======================================================
+    const DEFAULT_HEALTH_PATHS = ["/health", "/healthz", "/status", "/actuator/health", "/readyz", "/livez"];
+    const SETTINGS = {
+      timeoutMs: 5000,
+      retries: 60,
+      retryDelayMs: 400,
+      // Falls APIs kein CORS erlauben, auf true setzen und PROXY_URL konfigurieren
+      useProxy: false,
+      PROXY_URL: "http://localhost:3000/proxy?url="
+    };
+
+    // Liste der Endpunkte (Beispiele) das sollte sich aus der App-Konfiguration ermitteln lassen
+    const ENDPOINTS = [
+      { name: "Stub 1",			endpointUrl: "/demo/demo1",		healthUrl: "/demo/demo1/health",        							expected: { status: 200, jsonKey: "status", okValues: ["UP", "OK"] }},
+      { name: "Stub 2",			endpointUrl: "/demo/demo2",		healthUrl: "/demo/demo2/health.html",								expected: { status: 200 }},
+      { name: "Stub 3",			endpointUrl: "/demo/demo3",		healthUrl: "/demo/demo3/actuator/health",	baseUrl: "/demo/demo3",	expected: { status: 200, jsonKey: "status", okValues: ["UP", "OK", "healthy"] }},
+      { name: "Stub 4",			endpointUrl: "/demo/demo4",		healthUrl: "/demo/demo4/actuator/health",							expected: { status: 200, jsonKey: "status", okValues: ["UP", "OK", "healthy"] }},
+      { name: "Stub 5",			endpointUrl: "/demo/demo5",		healthUrl: "/demo/demo5/actuator/health",							expected: { status: 200, jsonKey: "status", okValues: ["UP", "OK", "healthy"] }},
+	  { name: "Stub 6",			endpointUrl: "/demo/demo6",													baseUrl: "/demo/demo6",	expected: { status: 200, jsonKey: "status", okValues: ["UP", "OK", "healthy"] }},
+	  { name: "Stub 7",			endpointUrl: "/demo/demo7",													baseUrl: "/demo/demo7",	expected: { status: 200, jsonKey: "status", okValues: ["UP", "OK", "healthy"] }},
+    ];
+
+    // ==== Utilities ===========================================================
+    const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+
+    function toProxy(url) {
+      return SETTINGS.useProxy ? SETTINGS.PROXY_URL + encodeURIComponent(url) : url;
+    }
+
+    
+	function withTimeout(fetcher, timeoutMs) {
+	  const controller = new AbortController();
+	  const id = setTimeout(() => controller.abort(), timeoutMs);
+
+	  return fetcher(controller.signal)
+		.finally(() => clearTimeout(id))
+		.catch((err) => {
+		  // Einheitliche Fehlerkennzeichnung bei Timeout/Abort
+		  if (err?.name === "AbortError") {
+			const e = new Error("timeout");
+			e.code = "TIMEOUT";
+			throw e;
+		  }
+		  throw err;
+		});
+	}
+
+
+
+	async function fetchWithRetries(url, options, retries, timeoutMs) {
+	  let attempt = 0;
+	  while (true) {
+		const start = performance.now();
+		try {
+		  // Wichtig: fetcher ist eine Funktion, die den signal bekommt
+		  const response = await withTimeout(
+			(signal) => fetch(url, { ...options, signal }),
+			timeoutMs
+		  );
+		  const durationMs = Math.round(performance.now() - start);
+		  return { response, durationMs };
+		} catch (err) {
+		  // Browser-CORS/Netzwerkfehler erscheinen oft als TypeError
+		  const isNetworkLike =
+			err?.name === "TypeError" ||
+			err?.code === "TIMEOUT" ||
+			/network|failed to fetch|timeout|aborted/i.test(String(err?.message || ""));
+
+		  if (attempt >= retries || !isNetworkLike) {
+			// Letzter Versuch ODER nicht-retryable Fehler → weitergeben
+			throw err;
+		  }
+		  attempt++;
+		  await sleep(SETTINGS.retryDelayMs);
+		}
+	  }
+	}
+
+
+    
+	function looksHealthy({ response, bodyText }, expected) {
+	  if (!response) return false;
+	  const httpOk = expected?.status ? response.status === expected.status : response.ok;
+	  if (!httpOk) return false;
+
+	  if (expected?.jsonKey) {
+		try {
+		  const json = JSON.parse(bodyText || "{}");
+		  const v = json?.[expected.jsonKey];
+		  if (expected.okValues && Array.isArray(expected.okValues)) {
+			return expected.okValues.map(s => String(s).toLowerCase()).includes(String(v).toLowerCase());
+		  }
+		} catch {
+		  // Wenn kein JSON: nicht hart negativ werten, HTTP-OK reicht ggf.
+		  return httpOk;
+		}
+	  }
+
+	  if (bodyText && /(^|\b)(UP|OK|HEALTHY)(\b|$)/i.test(bodyText)) return true;
+	  return httpOk;
+	}
+
+
+    function resolveHealthCandidates(ep) {
+      if (ep.healthUrl) return [ep.healthUrl];
+      const base = ep.baseUrl || new URL(ep.endpointUrl).origin;
+      return DEFAULT_HEALTH_PATHS.map(p => base.replace(/\/+$/, "") + p);
+    }
+
+    // ==== Health-Check ========================================================    	
+	async function checkHealth(ep) {
+	  const candidates = resolveHealthCandidates(ep);
+	  let lastFailure = null;       // speichert letzten Fehler (Netzwerk/timeout)
+	  let lastUnhealthy = null;     // speichert letzte nicht-gesunde Antwort (HTTP 404/500 etc.)
+
+	  for (const rawUrl of candidates) {
+		const url = toProxy(rawUrl);
+		try {
+		  const { response, durationMs } = await fetchWithRetries(
+			url,
+			{ method: "GET" },
+			SETTINGS.retries,
+			SETTINGS.timeoutMs
+		  );
+
+		  // Body sicher lesen (CORS kann hier Probleme machen)
+		  let bodyText = "";
+		  try {
+			bodyText = await response.text();
+		  } catch (_) {
+			bodyText = "";
+		  }
+
+		  const healthy = looksHealthy({ response, bodyText }, ep.expected);
+
+		  if (healthy) {
+			// ✅ Erster gesunder Kandidat -> sofort zurückgeben
+			return {
+			  endpoint: ep,
+			  healthy: true,
+			  urlTried: rawUrl,
+			  status: response.status,
+			  durationMs,
+			  bodySnippet: (bodyText || "").slice(0, 400)
+			};
+		  }
+
+		  // ❌ Kandidat geantwortet, aber nicht gesund (z. B. 404/500) -> weiterversuchen
+		  lastUnhealthy = {
+			endpoint: ep,
+			healthy: false,
+			urlTried: rawUrl,
+			status: response.status,
+			durationMs,
+			bodySnippet: (bodyText || "").slice(0, 400)
+		  };
+
+		  // → Keine Rückgabe hier! Wir probieren die nächsten Kandidaten.
+		} catch (err) {
+		  // Netzwerk-/Timeout-/CORS-Fehler -> merken und weiterversuchen
+		  lastFailure = {
+			endpoint: ep,
+			healthy: false,
+			urlTried: rawUrl,
+			error: String(err?.message || err)
+		  };
+		  // → weiter zum nächsten Kandidaten
+		}
+	  }
+
+	  // 🔚 Nach allen Kandidaten: Wenn es eine "nicht gesunde" Antwort gab (404/500),
+	  // gib diese zurück; sonst den letzten Netzwerk-/Timeout-Fehler.
+	  if (lastUnhealthy) return lastUnhealthy;
+
+	  return lastFailure || {
+		endpoint: ep,
+		healthy: false,
+		urlTried: candidates[candidates.length - 1],
+		error: "Kein Kandidat lieferte eine Antwort"
+	  };
+	}
+
+
+
+    // ==== Rendering ===========================================================
+    function render(results) {
+      const onlyHealthy = document.getElementById("onlyHealthy").checked;
+      const container = document.getElementById("cards");
+      container.innerHTML = "";
+
+      const shown = results.filter(r => (onlyHealthy ? r.healthy : true));
+      const okCount = results.filter(r => r.healthy).length;
+
+      const summary = document.getElementById("summary");
+      summary.innerHTML = `
+        <div class="badge">Gesamt: ${results.length} • Gesund: ${okCount} • Ungesund: ${results.length - okCount}</div>
+      `;
+
+      for (const r of shown) {
+        const ep = r.endpoint;
+        const statusText = r.healthy ? "✅ Gesund" : "❌ Nicht erreichbar";
+        const cls = r.healthy ? "ok" : "bad";
+        const statusDetail = r.status ? `HTTP ${r.status}` : (r.error ? r.error : "—");
+        const duration = r.durationMs ? `${r.durationMs} ms` : "—";
+
+		const linkHtml = ep.endpointUrl
+		  ? `<a class="link" href="${escapeHtml(ep.endpointUrl)}" target="_blank" rel="noopener noreferrer">Endpunkt öffnen ↗</a>`
+		  : `<span class="badge">Kein Endpunkt-Link konfiguriert</span>`;
+
+
+        const bodyHtml = (r.bodySnippet)
+          ? `<div class="pre">${escapeHtml(r.bodySnippet)}</div>`
+          : (r.error ? `<div class="pre">Fehler: ${escapeHtml(r.error)}</div>` : "");
+
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `
+          <div class="title">${escapeHtml(ep.name)} <span class="badge">${escapeHtml(r.urlTried || "")}</span></div>
+          <div class="meta"><span class="${cls}">${statusText}</span><span>•</span><span>${statusDetail}</span><span>•</span><span>${duration}</span></div>
+          <div class="row">${linkHtml}</div>
+          ${bodyHtml}
+        `;
+        container.appendChild(card);
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    // ==== App-Logik ===========================================================
+    async function run() {
+      const runBtn = document.getElementById("runBtn");
+      runBtn.disabled = true;
+      runBtn.textContent = "Prüfe …";
+
+      try {
+        const tasks = ENDPOINTS.map(ep => checkHealth(ep));
+        const results = await Promise.all(tasks);
+        window.__lastResults = results;
+        render(results);
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = "Health-Checks starten";
+      }
+    }
+
+    document.getElementById("runBtn").addEventListener("click", run);
+    document.getElementById("reloadBtn").addEventListener("click", () => location.reload());
+    document.getElementById("onlyHealthy").addEventListener("change", () => {
+      if (window.__lastResults) render(window.__lastResults);
+    });
+	
+	
+    // ==== Export-Feature ===================================================
+    async function runHealthChecksAndExportJSON() {
+      // Falls schon Ergebnisse vorhanden sind, nutze sie; sonst neu ausführen
+      if (!window.__lastResults || !Array.isArray(window.__lastResults)) {
+        await run();
+      }
+      const results = window.__lastResults || [];
+
+      // In gewünschtes JSON-Format überführen
+      const payload = {
+        timestamp: new Date().toISOString(),
+        results: results.map(r => ({
+          name: r.endpoint?.name,
+          endpointUrl: r.endpoint?.endpointUrl,
+          checkedUrl: r.urlTried || null,
+          status: r.healthy ? "healthy" : "unhealthy",
+          httpStatus: r.status ?? null,
+          durationMs: r.durationMs ?? null,
+          bodySnippet: r.bodySnippet ?? null,
+          error: r.error ?? null
+        }))
+      };
+
+      // Konsole
+      console.log("Healthcheck JSON:", JSON.stringify(payload, null, 2));
+
+      // Download als Datei
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `healthcheck-results-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    const exportBtn = document.getElementById("exportBtn");
+    exportBtn.addEventListener("click", runHealthChecksAndExportJSON);
+
+
+    // Auto-Start beim Laden
+    window.addEventListener("DOMContentLoaded", run);
+  </script>
+
+</body>
+</html>
